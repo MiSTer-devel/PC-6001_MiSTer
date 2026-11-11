@@ -16,7 +16,7 @@ module top #(
    input         tape_rewind,
    input         tape_autostart,
    input         composite,        // the picture through rtl/pc6001_composite.sv
-   input   [2:0] comp_bw,          // bw_tv (rtl/pc6001_composite.sv)
+   input   [2:0] comp_bw,          // OSD B/W colours: bw_tv (rtl/pc6001_composite.sv), m4col (rtl/pc6001_vdg.sv)
 
    output [7:0]  VGA_R /*verilator public_flat*/,
    output [7:0]  VGA_G /*verilator public_flat*/,
@@ -52,14 +52,14 @@ module top #(
    input   [7:0] ioctl_dout,
    output        ioctl_wait,
 
-   // the disk image, as hps_io's S0 (sim_headless.cpp serves the blocks)
-   input         img_mounted,
+   // the disk images, as hps_io's S0 and S1 (sim_headless.cpp serves the blocks)
+   input   [1:0] img_mounted,
    input         img_readonly,
    input  [63:0] img_size,
    output [31:0] sd_lba,
-   output        sd_rd,
-   output        sd_wr,
-   input         sd_ack,
+   output  [1:0] sd_rd,
+   output  [1:0] sd_wr,
+   input   [1:0] sd_ack,
    input   [8:0] sd_buff_addr,
    input   [7:0] sd_buff_dout,
    output  [7:0] sd_buff_din,
@@ -94,21 +94,34 @@ wire        rgb_pix, HSync, VSync, HBlank, VBlank, mono;
 wire  [4:0] cidx;
 wire        tape_turbo_on;
 wire [427:0] tape_status_word;
-wire        hint_show, hint_two;
+wire        hint_show, hint_two, hint_force;
 wire [383:0] hint_text;
 wire        tape_status_req, tape_status_ack;
+
+// OSD Model, as PC6001.sv's cfg: taken at reset; the game list can switch it (rtl/tape_auto.sv)
+reg  [1:0] model_r;
+wire       model_set;
+wire [1:0] model_req;
+always @(posedge clk_sys) begin
+   if (reset) model_r <= model;
+   else if (model_set) begin
+      model_r <= model_req;
+      $display("[sim] the game list switches Model to %0d", model_req);
+   end
+end
 
 pc6001 #(.TURBO(TURBO)) pc6001
 (
    .clk_sys(clk_sys),
    .reset(reset),
-   .model(model),
+   .model(model_r),
    .ioctl_wait(ioctl_wait),
    .ram16k(ram16k),
    .tape_turbo(tape_turbo),
    .tape_rewind(tape_rewind),
    .cart_eject(1'b0),
    .tape_autostart(tape_autostart),
+   .m4col(composite && model_r != 2'd0 ? 3'd4 : comp_bw),
    .ps2_key(ps2_key),
    .kbd_us(kbd_us),
    .joy0(joy0), .joy1(joy1),
@@ -132,7 +145,8 @@ pc6001 #(.TURBO(TURBO)) pc6001
    .tape_turbo_on(tape_turbo_on),
    .tape_position(tape_position),
    .tape_length(tape_length),
-   .hint_show(hint_show), .hint_two(hint_two), .hint_text(hint_text),
+   .hint_show(hint_show), .hint_two(hint_two), .hint_text(hint_text), .hint_force(hint_force),
+   .model_set(model_set), .model_req(model_req),
    .cart_too_big(),
 
    .img_mounted(img_mounted), .img_readonly(img_readonly), .img_size(img_size),
@@ -154,7 +168,7 @@ pc6001 #(.TURBO(TURBO)) pc6001
 tape_status tape_status
 (
    .clk(clk_sys),
-   .loaded(tape_loaded), .playing(tape_motor), .fast(tape_turbo_on),
+   .loaded(tape_loaded | hint_force), .playing(tape_motor && !hint_force), .fast(tape_turbo_on),
    .position({15'd0, tape_position}), .length({15'd0, tape_length}), .hz(18'd100),
    .hint_show(hint_show), .hint_two(hint_two), .hint_text(hint_text),
    .status(tape_status_word), .req(tape_status_req), .ack(tape_status_ack)
@@ -165,7 +179,7 @@ wire [7:0] c_r, c_g, c_b;
 pc6001_composite pc6001_composite
 (
    .clk(clk_sys), .reset(reset), .mono(mono), .bw_tv(comp_bw),
-   .cidx(cidx), .hs_in(HSync), .vs_in(VSync), .hb_in(HBlank), .vb_in(VBlank),
+   .cidx(cidx), .rgb_in(model_r != 2'd0), .r_in(R), .g_in(G), .b_in(B), .hs_in(HSync), .vs_in(VSync), .hb_in(HBlank), .vb_in(VBlank),
    .ce_pix(c_pix), .r(c_r), .g(c_g), .b(c_b), .hs(c_hs), .vs(c_vs), .hb(c_hb), .vb(c_vb)
 );
 assign ce_pix = composite ? c_pix : rgb_pix;
@@ -191,7 +205,7 @@ tape_overlay #(.FACTOR(4'(TURBO))) tape_overlay_i
 );
 
 
-// DDR3 (sys/ddr_svc's side of emu): 512 KB at the disk image's base, one access at a time, busy now and then and
+// DDR3 (sys/ddr_svc's side of emu): from the disk images' base, one access at a time, busy now and then and
 // reads coming back some clocks later, as the real one
 wire        ddr_rd, ddr_we;
 wire [28:0] ddr_addr;
@@ -199,7 +213,7 @@ wire [63:0] ddr_din;
 wire  [7:0] ddr_be;
 reg  [63:0] ddr_dout;
 reg         ddr_dout_ready = 0;
-reg  [63:0] ddr_mem[0:262143];   // 2 MB: the disk image at 0, the ROM store at 20000h words
+reg  [63:0] ddr_mem[0:262143];   // 2 MB: the disk images at 0 and 10000h words, the ROM store at 20000h
 reg   [3:0] ddr_lat = 0;
 reg  [17:0] ddr_ra;
 reg   [7:0] ddr_lfsr = 8'h5a;
@@ -207,6 +221,7 @@ wire        ddr_busy = ddr_lfsr[0] & ddr_lfsr[3] | ddr_lat != 0;
 always @(posedge clk_sys) begin
    ddr_lfsr <= {ddr_lfsr[6:0], ddr_lfsr[7] ^ ddr_lfsr[5] ^ ddr_lfsr[4] ^ ddr_lfsr[3]};
    ddr_dout_ready <= 0;
+   if (ddr_rd && ddr_we) $display("ddr: rd and we together at %h", ddr_addr);
    if (ddr_lat != 0) begin
       ddr_lat <= ddr_lat - 1'd1;
       if (ddr_lat == 1) begin ddr_dout <= ddr_mem[ddr_ra]; ddr_dout_ready <= 1; end

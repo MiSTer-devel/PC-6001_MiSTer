@@ -5,6 +5,7 @@
 #
 # ROMs: ../rom/BASICROM.60, ../rom/CGROM60.60 and, for the disk test, ../rom/DISK.ROM (not in the repository).
 # TAPES=1 adds the tape, cartridge and disk tests, which use ../refs/software (not in the repository either).
+# ONLY=a,b runs just those tests.
 set -u
 cd "$(dirname "$0")"
 SIM=${SIM:-./obj_dir_headless/Vtop}   # SIM=path: another build
@@ -15,6 +16,7 @@ mkdir -p "$OUT" tests/expected
 fail=0
 run() {   # name frame args...
 	local name=$1 frame=$2; shift 2
+	if [ -n "${ONLY:-}" ] && [[ ",$ONLY," != *",$name,"* ]]; then return; fi
 	local dir=$OUT/$name
 	rm -rf "$dir"; mkdir -p "$dir"
 	"$SIM" --quiet --rom-dir ../rom --out "$dir" --frame-log "$dir/frames.csv" --stop-at-frame "$frame" \
@@ -30,7 +32,7 @@ run() {   # name frame args...
 run boot_pages 300
 run basic_print 520 --type '155:\n' --type '200:print 12*3\n' --type '330:PRINT "Hi"\n'
 run screen3_lines 1400 --type '155:2\n{WAIT30}10 SCREEN 3,2,2:CLS\n{WAIT20}20 LINE (0,0)-(127,191),2:LINE (127,0)-(0,191),3\n{WAIT20}30 LINE (10,90)-(120,100),4,BF\n{WAIT20}40 GOTO 40\n{WAIT20}RUN\n'
-run screen4_lines 1400 --type '155:2\n{WAIT30}10 SCREEN 4,2,2:CLS\n{WAIT20}20 LINE (0,0)-(127,191)\n{WAIT20}30 LINE (10,10)-(60,40),,BF\n{WAIT20}40 GOTO 40\n{WAIT20}RUN\n'
+run screen4_lines 1400 --bw 4 --type '155:2\n{WAIT30}10 SCREEN 4,2,2:CLS\n{WAIT20}20 LINE (0,0)-(127,191)\n{WAIT20}30 LINE (10,10)-(60,40),,BF\n{WAIT20}40 GOTO 40\n{WAIT20}RUN\n'
 # Keyboard = US: every US symbol the P6 has, as printed on the keys
 run kbd_us 900 --kbd-us --type '155:1\n{WAIT40}PRINT "!@#$%^&*()-_=+[]\\;:'"'"',.<>/?"\n'
 # OSD Video = Composite (rtl/pc6001_composite.sv): the boot screen through the NTSC encoder and decoder
@@ -49,6 +51,12 @@ run mk2_talk 900 --mk2 --no-disk-unit --type '300:5{WAIT100}\n{WAIT100}\nTALK"F2
 run sr_menu 300 --sr --no-disk-unit
 run sr_basic 700 --sr --no-disk-unit --type '300:6' --type '500:PRINT "HELLO SR"\n'
 run sr_roll 1300 --sr --no-disk-unit --type '300:6' --type '500:SCREEN 2,2,2:LINE(40,20)-(60,180),15,BF:ROLL 3,0:FOR I=0 TO 9000:NEXT\n'
+# OSD Video = Composite on the later models (rtl/pc6001_composite.sv, their RGB as NTSC): the mkII's and the SR's menus
+run mk2_composite 300 --mk2 --composite 0
+run sr_composite 300 --sr --no-disk-unit --composite 0
+# the wrong-model hint (rtl/tape_auto.sv): a mkII port written on the PC-6001, an SR port on the mkII
+run wrong_mk2 700 --type '155:2\n{WAIT30}OUT &HF0,&H71\n'
+run wrong_sr 900 --mk2 --no-disk-unit --type '300:1{WAIT100}\n{WAIT60}OUT &HC8,0\n'
 if [ "${TAPES:-0}" = 1 ]; then
 	run tape_lights_proto 1500 --tape "../refs/software/pc6001/cas/Lights_Out_Hiroshi_Ishioka_/Lights Out (BASIC prototype) {m1p1}.cas" \
 		--type '155:1\n{WAIT30}CLOAD\n' --type '1250:LIST\n'
@@ -66,6 +74,9 @@ if [ "${TAPES:-0}" = 1 ]; then
 	# formatted in the simulator by the PC-6001 Series Disk Format Program, with TEST saved on it
 	run disk_extbasic 1200 --cart "$C/_OS_N60_Extended_BASIC_Microsoft_/[OS] N60 Extended BASIC (ROM cart).bin" \
 		--disk tests/disk/test.d88 --type '300:\n{WAIT60}\n{WAIT60}FILES\n{WAIT200}LOAD"TEST"\n{WAIT250}LIST 10-30\n'
+	# the same disk in drive 2 (OSD Disk 2): FILES 2, LOAD"2:TEST"
+	run disk_drive2 1300 --cart "$C/_OS_N60_Extended_BASIC_Microsoft_/[OS] N60 Extended BASIC (ROM cart).bin" \
+		--disk2 tests/disk/test.d88 --type '300:\n{WAIT60}\n{WAIT60}FILES 2\n{WAIT200}LOAD"2:TEST"\n{WAIT250}LIST 10-30\n'
 	# touch panel (rtl/touch_panel.sv): the Touch Panel cartridge draws a diagonal then a line back, the pen moving
 	# 2-3 steps a frame (it ignores jumps of 5 or more); the cross is the pen
 	t=(--touch 400:0,0,0); f=500
@@ -80,9 +91,32 @@ if [ "${TAPES:-0}" = 1 ]; then
 	# mkII mode 5 160x200 in 16 colours (SCREEN 3, C1 = 09h): bars of colours 1-16, 10 dots each
 	m=(--type '300:5{WAIT100}\n{WAIT60}\n10 SCREEN 3,2,2:CLS\n{WAIT20}20 FOR I=0 TO 15:LINE(I*10,0)-(I*10+9,99),I+1,BF:NEXT\n{WAIT20}30 GOTO 30\n{WAIT20}RUN\n')
 	run mk2_screen3 3300 --mk2 --no-disk-unit "${m[@]}"
+	run mk2_screen3_composite 3300 --mk2 --no-disk-unit --composite 0 "${m[@]}"
+	# OSD B/W colours on the RGB picture (rtl/pc6001_vdg.sv, PC6001VX's colour table): mode 4 stripes on the mkII
+	# (N60 BASIC, mode 2), Red/Blue: colour set 2, even-dot stripes blue, odd-dot red, the box white
+	m=(--type '300:2{WAIT100}2\n{WAIT60}10 SCREEN 4,2,2:COLOR 1,0,1:CLS\n{WAIT20}20 FOR X=0 TO 62 STEP 2:LINE(X,0)-(X,80):NEXT\n{WAIT20}30 FOR X=129 TO 191 STEP 2:LINE(X,0)-(X,80):NEXT\n{WAIT20}40 LINE(0,100)-(255,150),,BF:FOR I=1 TO 900:NEXT:COLOR 1,0,2\n{WAIT20}50 GOTO 50\n{WAIT20}RUN\n')
+	run mk2_screen4_colour 3000 --mk2 --no-disk-unit "${m[@]}"
+	# the game list (rtl/pc6001_gamelist.svh) with Tape auto-start: Space Mouse's dump lacks its last byte and needs
+	# CLEAR 10,&HD5FF typed first (the list adds both: the maze); Portopia, mounted on a PC-6001, switches the
+	# model to the mkII (mode 4, 1 page) and shows the list's hint over the colour test
+	K="../refs/software/pc6001/neokobe_full_unzipped/NEC PC-6001"
+	run gamelist_smouse 3000 --tape "$K/Space Mouse (Akihisa Kanda)/Space Mouse [CT cas]/Space Mouse {m2p2 clear 10,&hd5ff}.cas" \
+		--tape-turbo --autostart
+	run gamelist_portopia 1500 --all-roms --tape-turbo --autostart \
+		--tape "$K/Portopia Renzoku Satsujin Jiken (Yuji Horii - Enix)/Portopia Renzoku Satsujin Jiken [CT]/Portopia Renzoku Satsujin Jiken {m2p1}.cas"
+	# without the mkII's ROMs the list cannot switch: the hint, and nothing typed
+	run gamelist_wrong 400 --tape-turbo --autostart \
+		--tape "$K/Portopia Renzoku Satsujin Jiken (Yuji Horii - Enix)/Portopia Renzoku Satsujin Jiken [CT]/Portopia Renzoku Satsujin Jiken {m2p1}.cas"
 	# the PC-6601's built-in drive (rtl/fdc66.sv): N66-BASIC lists and loads TEST from the PC-6031 test disk
 	run p66_disk 1700 --p66 --disk tests/disk/test.d88 \
 		--type '320:5{WAIT100}\n{WAIT100}\n{WAIT100}\n{WAIT60}FILES\n{WAIT150}LOAD"TEST"\n{WAIT250}LIST 10-30\n'
+	# a mkII disk that boots itself: the mkII's BASIC runs track 0 sector 1 when it starts with "SYS" (Nyahacks 60)
+	run mk2_disk_sys 1200 --mk2 --disk "../refs/software/pc6001/d88/Nyahacks_60_Bookworm_/Nyahacks 60.d88"
+	# the mkIISR's PC-6031SR: a 1DD disk (80 tracks) lists in N66SR-BASIC (rtl/upd765_lite.sv, dd)
+	run sr_disk_1dd 1100 --sr --disk "../refs/software/pc6001/d88/The_Akunin_Tinyan_/The Akunin {m6f1 run bp8510.bas}.d88" \
+		--type '300:6{WAIT100}1\n{WAIT200}FILES\n'
+	# an SR boot disk on a 1DD layout (track table by cylinder, media 40h): Golf Island starts by itself
+	run sr_disk_boot 1100 --sr --disk "../refs/software/sr/d88/Golf_Island_Tecno_Soft_/Golf Island (66SR).d88"
 	# a mkII game: Chack'n Pop (mode 5, 1 page; Neo Kobe set) loads at 7x and shows its title screen
 	CP="../refs/software/pc6001/neokobe_full_unzipped/NEC PC-6001/Chack'n Pop (Carry lab)/Chack'n Pop [CT]/Chack'n Pop {m5p1}.cas"
 	run mk2_chackpop 5100 --mk2 --no-disk-unit --tape "$CP" --tape-turbo --type '300:5{WAIT100}1\n{WAIT80}CLOAD\n' \

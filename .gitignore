@@ -40,7 +40,7 @@ rom/
 rom.zip
 quartus_build.log
 
-# release cores
+# releases keep their cores and boot.rom
 !releases/**/*.rbf
 
 # scratch runs and OS / Python droppings

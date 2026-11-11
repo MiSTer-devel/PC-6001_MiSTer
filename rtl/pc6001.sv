@@ -40,6 +40,7 @@ module pc6001 #(
 	input             tape_rewind,
 	input             cart_eject,
 	input             tape_autostart,  // OSD: mounting a tape types what it needs (rtl/tape_auto.sv)
+	input       [2:0] m4col,           // OSD B/W colours: mode 4 in colour (rtl/pc6001_vdg.sv)
 
 	input      [10:0] ps2_key,
 	input             kbd_us,          // keyboard layout: 1 US symbols, 0 JIS positions
@@ -79,16 +80,20 @@ module pc6001 #(
 	output            hint_show,       // what to type, while the deck is stopped (rtl/tape_auto.sv)
 	output            hint_two,
 	output    [383:0] hint_text,
+	output            hint_force,      // "MOUNT THE NEXT TAPE" or the wrong-model hint: over the tape bar, and without
+	                                   // a tape
+	output            model_set,       // one clk: the game list switches OSD Model to model_req (rtl/tape_auto.sv)
+	output      [1:0] model_req,
 	output            cart_too_big,    // the image was larger than 16 KB (cut off)
 
-	// PC-6031 disk unit (rtl/pc6031.sv): its firmware is DISK.ROM at 5000h in the ROM download
-	input             img_mounted,
+	// PC-6031 disk unit (rtl/pc6031.sv): its firmware is DISK.ROM at 5000h in the ROM download; drives 1 and 2
+	input       [1:0] img_mounted,
 	input             img_readonly,
 	input      [63:0] img_size,
 	output     [31:0] sd_lba,
-	output            sd_rd,
-	output            sd_wr,
-	input             sd_ack,
+	output      [1:0] sd_rd,
+	output      [1:0] sd_wr,
+	input       [1:0] sd_ack,
 	input       [8:0] sd_buff_addr,
 	input       [7:0] sd_buff_dout,
 	output      [7:0] sd_buff_din,
@@ -200,7 +205,8 @@ reg         wait_n;
 wire auto_reset;   // rtl/tape_auto.sv: a tape mounted with Tape auto-start on
 wire reset_dl = reset | auto_reset | (ioctl_download & (ioctl_index[5:0] == 6'd0 | ioctl_index[5:0] == 6'd2));
 wire rs_busy;
-wire cpu_reset = reset_dl | rs_busy;   // and while the ROM store copies the model's ROMs
+wire cpu_reset = reset_dl | rs_busy;
+wire [2:0] rs_sets;   // and while the ROM store copies the model's ROMs
 
 `ifdef VERILATOR
 T80s cpu
@@ -591,6 +597,7 @@ pc6001_sub sub
 	.mk2(mk2),
 	.addr(A[1:0]),
 	.rd(io_rd & sel_ppi),
+	.rd_act(io_cyc & ~rd_n),
 	.wr(io_wr & sel_ppi),
 	.din(cpu_dout),
 	.dout(ppi_dout),
@@ -632,18 +639,36 @@ assign tape_length   = tape_len;
 // .p6t (P6T2): the byte image, a footer starting "P6", and the image size (4 bytes, little-endian) at the end.
 // After a download rtl/tape_auto.sv reads the footer; then only the image plays. The footer's gaps (silence,
 // carrier) are not played. A .p6/.cas has no footer and plays whole.
-wire        ta_busy, ta_len_set;
+// A machine-code block's sync (six or more 9Ch) after the tape's start waits GAP byte times first, as the carrier
+// before a block on a real tape: a loader that reads a header, waits and closes the cassette (ROM 1B06), then
+// opens it again for the data loses the bytes that come in the wait, and with no gap those are the sync's first
+// (Space Mouse 2's loader: two of six 9Ch gone, the data never found)
+wire        ta_busy, ta_len_set, ta_app;
+wire  [7:0] ta_app_d;
 wire [15:0] ta_addr, ta_len;
-wire [15:0] tape_raddr = ta_busy ? ta_addr : tape_pos[15:0];
+// When the motor stops with only 00h/FFh left (a BASIC tape's padding), the tape is at its end: a loader started
+// by RUN then waits for the next tape instead of taking the padding as data (Slender Island: CLOAD part 1, swap,
+// RUN reads part 2 raw, with no sync)
+localparam   GAP = 7'd50;
+reg         trim = 0, trim_ph, tape_motor_l;
+reg  [16:0] trim_a;
+reg         look = 0, need_look = 0, q_pos;
+reg   [2:0] look_n;
+reg   [6:0] gap = 0;
+wire [15:0] tape_raddr = ta_busy ? ta_addr : trim | look ? trim_a[15:0] : tape_pos[15:0];
 always @(posedge clk_sys) begin
 	if (tape_wr) tape_mem[ioctl_addr[15:0]] <= ioctl_dout;
+	else if (ta_app) tape_mem[tape_len[15:0]] <= ta_app_d;   // the game list's byte after the image
 	tape_q <= tape_mem[tape_raddr];
+	q_pos <= tape_raddr == tape_pos[15:0];   // tape_q is the byte at tape_pos
 end
 
 always @(posedge clk_sys) begin
 	tape_strobe <= 1'b0;
 	tape_dl <= ioctl_download && ioctl_index[5:0] == 6'd1;
+	tape_motor_l <= tape_motor;
 	if (ioctl_download && ioctl_index[5:0] == 6'd1) begin
+		trim <= 0; look <= 0; need_look <= 0; gap <= 0;
 		if (!tape_dl) begin tape_len <= 0; tape_big <= 0; end
 		if (tape_wr && ioctl_addr[24:16] == 0) tape_len <= ioctl_addr[16:0] + 1'd1;
 		if (tape_wr && ioctl_addr[24:16] != 0) tape_big <= 1'b1;
@@ -651,20 +676,64 @@ always @(posedge clk_sys) begin
 		tape_tick <= 0;
 	end
 	else if (ta_len_set) tape_len <= {1'b0, ta_len};
+	else if (ta_app) tape_len <= tape_len + 1'd1;
 	else if (ta_busy) ;
-	else if (tape_rewind) tape_pos <= 0;
+	else if (tape_rewind) begin tape_pos <= 0; trim <= 0; look <= 0; need_look <= 0; gap <= 0; end
+	else if (trim) begin
+		// a byte read at trim_a reaches tape_q a clock later
+		trim_ph <= ~trim_ph;
+		if (tape_motor || (trim_ph && tape_q != 8'h00 && tape_q != 8'hFF)) trim <= 0;
+		else if (trim_ph) begin
+			if (trim_a + 1'd1 >= tape_len) begin tape_pos <= tape_len; trim <= 0; end
+			trim_a <= trim_a + 1'd1;
+		end
+	end
+	else if (tape_motor_l && !tape_motor && tape_pos < tape_len) begin
+		trim <= 1'b1; trim_ph <= 0; trim_a <= tape_pos; look <= 0;
+	end
+	else if (look) begin
+		// the byte before tape_pos is not 9Ch, the six from tape_pos are: a sync starts
+		trim_ph <= ~trim_ph;
+		if (trim_ph) begin
+			if (look_n == 0 ? tape_q == 8'h9C : tape_q != 8'h9C) look <= 0;
+			else if (look_n == 3'd6) begin look <= 0; gap <= GAP; end
+			look_n <= look_n + 1'd1;
+			trim_a <= trim_a + 1'd1;
+		end
+	end
+	else if (need_look) begin
+		need_look <= 0;
+		if (tape_pos != 0 && tape_pos + 17'd6 <= tape_len) begin
+			look <= 1'b1; trim_ph <= 0; look_n <= 0; trim_a <= tape_pos - 1'd1;
+		end
+	end
 	else if (ce_cpu && tape_motor) begin
 		// 39936 Z80 states per byte (100 bytes/s; TURBO x 100 in turbo, where the Z80 runs TURBO x faster)
 		if (tape_tick >= 16'd39935) begin
 			tape_tick <= 0;
-			if (tape_pos < tape_len && tape_ready) begin
+			if (gap != 0) gap <= gap - 1'd1;
+			else if (tape_pos < tape_len && tape_ready && q_pos) begin
 				tape_strobe <= 1'b1;
 				tape_pos <= tape_pos + 1'd1;
+				need_look <= 1'b1;
 			end
 		end
 		else tape_tick <= tape_tick + 1'd1;
 	end
 end
+
+// The wrong-model hint (rtl/tape_auto.sv): a write to a port the running model lacks. On the PC-6001 the mkII's
+// map (F0-F3), C1-C3 and the voice (E0-E3; C0 is the PC-6001's printer). On the mkII and PC-6601 the mkIISR's
+// palette (40-43), map (60-6F), and C8h turning the SR screens on (b0 = 0): the mkII's N60m-BASIC writes FFh
+// there itself (Legends of Star Arthur 3's BLOAD, PC 0DE1h).
+wire need_mk2 = io_wr && !mk2 && (A[7:2] == 6'b1111_00 || A[7:2] == 6'b1110_00 || A[7:2] == 6'b1100_00 && A[1:0] != 0);
+wire need_sr  = io_wr && mk2 && !sr && (A[7:0] == 8'hC8 && !cpu_dout[0] || A[7:2] == 6'b0100_00 || A[7:4] == 4'h6);
+// synthesis translate_off
+reg [15:0] cpu_pc_dbg;   // the last opcode fetch
+always @(posedge clk_sys) if (!m1_n && !mreq_n) cpu_pc_dbg <= A;
+always @(posedge clk_sys) if (need_mk2 || need_sr)
+	$display("[pc6001] a later model's port: OUT %02Xh, %02Xh at PC %04Xh", A[7:0], cpu_dout, cpu_pc_dbg);
+// synthesis translate_on
 
 // What to type for the tape: shown while the deck is stopped, typed after a reset with Tape auto-start on
 // (tape standard rules 25-28)
@@ -678,6 +747,9 @@ tape_auto tape_auto
 	.ram16k(ram16k),
 	.drives(disk_unit | p66),
 	.enable(tape_autostart),
+	.models({rs_sets, 1'b1}),
+	.model_set(model_set),
+	.model_req(model_req),
 	.dl(ioctl_download && ioctl_index[5:0] == 6'd1),
 	.wr(tape_wr && ioctl_addr[24:16] == 0),
 	.addr(ioctl_addr[16:0]),
@@ -688,6 +760,8 @@ tape_auto tape_auto
 	.rd_data(tape_q),
 	.img_len_set(ta_len_set),
 	.img_len(ta_len),
+	.app_we(ta_app),
+	.app_data(ta_app_d),
 	.pos(tape_pos),
 	.motor(tape_motor),
 	.cmt_open(cmt_open),
@@ -699,7 +773,10 @@ tape_auto tape_auto
 	.auto_reset(auto_reset),
 	.hint_show(hint_show),
 	.hint_two(hint_two),
-	.hint_text(hint_text)
+	.hint_text(hint_text),
+	.hint_force(hint_force),
+	.need_mk2(need_mk2),
+	.need_sr(need_sr)
 );
 
 // PSG: port A reads the joystick picked by port B bit 6 (0: joystick 2), active low:
@@ -822,6 +899,7 @@ pc6031 fdd
 	.rom_addr(ioctl_addr[10:0]),
 	.rom_d(ioctl_dout),
 	.rom_ok(disk_rom_ok),
+	.dd(sr),
 	.addr(A[1:0]),
 	.rd(io_rd & sel_fdd),
 	.wr(io_wr & sel_fdd),
@@ -856,6 +934,7 @@ pc6031 fdd
 	.ext_m_done(m66_done),
 	.ext_m_ready(m66_ready),
 	.ext_m_wprot(m66_wprot),
+	.ext_m_one_side(m66_one_side),
 	.disk_ready(disk_ready),
 	.disk_too_big(disk_too_big),
 	.motor(disk_motor)
@@ -890,6 +969,7 @@ rom_store rom_store
 	.ioctl_dout(ioctl_dout),
 	.ioctl_wait(ioctl_wait),
 	.busy(rs_busy),
+	.sets(rs_sets),
 	.rom_a(rs_a),
 	.rom_d(rs_d),
 	.rom_we(rs_we),
@@ -907,7 +987,7 @@ rom_store rom_store
 // the PC-6601's built-in drive, on the same disk image
 wire [19:0] m66_addr;
 wire  [7:0] m66_d, m66_q, fdc66_dout;
-wire        m66_rd, m66_we, m66_done, m66_ready, m66_wprot;
+wire        m66_rd, m66_we, m66_done, m66_ready, m66_wprot, m66_one_side;
 fdc66 fdc66
 (
 	.clk(clk_sys),
@@ -926,7 +1006,8 @@ fdc66 fdc66
 	.m_we(m66_we),
 	.m_d(m66_d),
 	.m_ready(m66_ready),
-	.m_wprot(m66_wprot)
+	.m_wprot(m66_wprot),
+	.m_one_side(m66_one_side)
 );
 
 reg [7:0] io_dout;
@@ -1054,6 +1135,7 @@ always @(*) begin
 	else cpu_din = io_dout;
 end
 
+
 //----------------------------------------------------------------------------
 // Video
 //----------------------------------------------------------------------------
@@ -1077,6 +1159,7 @@ pc6001_vdg vdg
 	.rollx(sr_rollx),
 	.rolly(sr_rolly),
 	.pal({sr_palw, sr_pal[3], sr_pal[2], sr_pal[1], sr_pal[0]}),
+	.m4col(m4col),
 	.vrtc_set(vrtc_set),
 	.vrtc_clr(vrtc_clr),
 	.bus_slow(bus_slow),

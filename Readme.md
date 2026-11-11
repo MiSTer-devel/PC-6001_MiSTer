@@ -43,20 +43,30 @@ means mode 2 at the menu and 3 pages. **A wrong page count often makes a game fa
 tapes on the mkII (Hudson Soft's games and others) load with `MON` then `R0`. The box tells you when a tape
 needs this.
 
+The core knows about 570 tapes by their contents: for those it uses the right mode, page count and commands
+(some need `CLEAR` first, or `MON`), and with Tape auto-start it switches to the model the tape was made for when
+that model's ROMs are on the SD card. When a program uses hardware the running model lacks, the box says which
+model it was made for.
+
 **Cartridges** (.rom, .bin, .60, up to 16 KB): mount one under **Cartridge** and the machine resets into it. Use
 **Remove cartridge** to go back to BASIC.
 
-**Disks** (.d88, 1D): mount under **Disk**. The PC-6001 needs DISK.ROM in boot.rom and the N60 Extended BASIC
-cartridge; the PC-6601 uses its built-in drive. Writes are saved back to the image on the SD card.
+**Disks** (.d88): mount under **Disk 1** and **Disk 2**. The PC-6001 and the mkII use the PC-6031 disk unit,
+which needs DISK.ROM in boot.rom (on the PC-6001 also the N60 Extended BASIC cartridge); the PC-6601 uses its
+built-in drive. On the mkIISR the unit is a PC-6031SR and takes 1DD disks (80 tracks), as SR software comes on.
+mkII disks that start with a `SYS` program boot by themselves. Writes are saved back to the image on the SD card.
+
+The core can't make an image file larger, so to format a new disk, start from a full-size blank:
+`python3 tools/blank_d88.py new.d88` (1D) or `--1dd` (1DD, for the SR).
 
 ## Keyboard
 
 | PC-6001 key | PC key |
 |---|---|
 | GRAPH | Alt |
-| KANA | F7 |
+| KANA | F7, or the kana key of a Japanese keyboard |
 | MODE | F8 |
-| STOP | F9, Pause or End |
+| STOP | F9 or End |
 | PAGE | Page Up / Page Down |
 | HOME, INS, DEL | Home, Insert, Delete / Backspace |
 | F1-F5 (Shift: F6-F10) | F1-F5 |
@@ -75,8 +85,8 @@ Letters without Shift are lower case, as on the real machine.
 | Memory | 16 or 32 KB for the PC-6001 (32 KB is a PC-6006 RAM cartridge) |
 | Tape speed / Tape auto-start / Rewind tape | as above |
 | Tape overlay | the tape counter, a progress bar and the next-step hint |
-| Video | RGB, or Composite (TV): the NTSC artifact colours that mode 4 (`SCREEN 4`) games were drawn for |
-| B/W colours | Composite only: which artifact colours the black/white set gives (TVs differed) |
+| Video | RGB, or Composite (TV) on every model: the NTSC artifact colours that mode 4 (`SCREEN 4`) games were drawn for |
+| B/W colours | which colours mode 4's black/white set gives (TVs differed); in RGB, None keeps black and white |
 | Port 2 | Joystick, or Touch panel: the mouse works NEC's Touch Panel cartridge (hold the left button to draw) |
 
 Joysticks are on ports 1 and 2, with two buttons each. **Swap Alt/Win keys** makes the Win keys GRAPH.
@@ -84,7 +94,7 @@ Joysticks are on ports 1 and 2, with two buttons each. **Swap Alt/Win keys** mak
 ## Not done yet
 
 - Printer and RS-232C. CSAVE, and loading tapes from WAV or the audio input.
-- A second disk drive, disks larger than 1D, and booting system disks.
+- 2D disks, and the PC-6601's disk formatting.
 - The banked Senshi no Cartridge.
 - The mkII voice chip's built-in phrases. `TALK` with text works.
 - The SR's serial port and voice interrupt. The PC-6601SR can't be done, because its ROMs have not been dumped.
