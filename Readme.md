@@ -48,6 +48,9 @@ The core knows about 570 tapes by their contents: for those it uses the right mo
 that model's ROMs are on the SD card. When a program uses hardware the running model lacks, the box says which
 model it was made for.
 
+Games on several tapes: mount the next part when the first has loaded. For the sets the core knows, it loads and
+starts that part without a reset. A tape image can be up to 128 KB.
+
 **Cartridges** (.rom, .bin, .60, up to 16 KB): mount one under **Cartridge** and the machine resets into it. Use
 **Remove cartridge** to go back to BASIC.
 
